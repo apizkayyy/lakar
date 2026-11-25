@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+python-multipart
+openai>=1.92
+pydantic-settings
+pytest
+httpx
+pydantic

@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lakar: Speak it. Sketch it.</title>
+  <style>
+    :root { --accent: #0f766e; --bg: #f8fafc; --card: #fff; --text: #0f172a; --muted: #64748b; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); }
+    header { text-align: center; padding: 2rem 1rem 1rem; }
+    header h1 { margin: 0; font-size: 2rem; }
+    header p { margin: .25rem 0 0; color: var(--muted); }
+    .controls { text-align: center; padding: 1rem; }
+    .mic { width: 84px; height: 84px; padding: 0; border: 0; border-radius: 50%;
+       display: inline-grid; place-items: center; background: var(--accent); color: #fff;
+       cursor: pointer; box-shadow: 0 4px 14px rgba(15,118,110,.35); transition: transform .15s; }
+.mic:hover:not(:disabled) { transform: scale(1.06); }
+.mic:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+.mic svg { width: 36px; height: 36px; fill: currentColor; }
+.mic .icon-stop { display: none; }
+.mic.recording { background: #dc2626; animation: pulse 1.4s infinite; }
+.mic.recording .icon-mic { display: none; }
+.mic.recording .icon-stop { display: block; }
+.hint { margin: .9rem 0 0; font-size: .9rem; color: var(--muted); }
+@keyframes pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(220,38,38,.5); }
+  100% { box-shadow: 0 0 0 22px rgba(220,38,38,0); }
+}
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    @keyframes pulse { 50% { opacity: .7; } }
+    #status { margin-top: .75rem; color: var(--muted); min-height: 1.4em; }
+    #status.error { color: #dc2626; }
+    main { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; padding: 1rem; max-width: 1200px; margin: 0 auto; }
+    @media (max-width: 800px) { main { grid-template-columns: 1fr; } }
+    section { background: var(--card); border-radius: 12px; padding: 1.25rem; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+    section h2 { margin-top: 0; font-size: 1.1rem; color: var(--accent); }
+    .placeholder { color: var(--muted); }
+    #diagram { overflow-x: auto; }
+    details { margin-top: 1rem; color: var(--muted); }
+    #transcript { white-space: pre-wrap; }
+
+    .seg { display: inline-flex; border: 1px solid #cbd5e1; border-radius: 999px; overflow: hidden; margin-bottom: 1rem; }
+.seg button { border: 0; background: transparent; padding: .4rem 1rem; font-size: .9rem; color: var(--muted); cursor: pointer; }
+.seg button.active { background: var(--accent); color: #fff; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Lakar</h1>
+    <p>Speak it. Sketch it.</p>
+  </header>
+
+  <div class="controls">
+    <button id="record" class="mic" type="button" aria-label="Start recording" aria-pressed="false">
+  <svg class="icon-mic" viewBox="0 0 24 24" aria-hidden="true">
+    <path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/>
+  </svg>
+  <svg class="icon-stop" viewBox="0 0 24 24" aria-hidden="true">
+    <rect x="6" y="6" width="12" height="12" rx="2"/>
+  </svg>
+</button>
+<p class="hint" id="hint">Tap the mic and start speaking. Tap again to stop.</p>
+<div id="status"></div>
+  </div>
+
+  <main>
+    <section>
+      <h2>Notes</h2>
+      <div id="notes"><p class="placeholder">Your notes will appear here.</p></div>
+      <details>
+        <summary>Transcript</summary>
+        <p id="transcript"></p>
+      </details>
+    </section>
+    <section>
+      <h2>Diagram</h2>
+<div class="seg" role="group" aria-label="Diagram type">
+  <button type="button" data-style="mindmap" class="active">Mind map</button>
+  <button type="button" data-style="flowchart">Flowchart</button>
+</div>
+      <div id="diagram"><p class="placeholder">Your diagram will appear here.</p></div>
+    </section>
+  </main>
+
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({ startOnLoad: false });
+
+    const $ = (id) => document.getElementById(id);
+    const recordBtn = $("record");
+    const statusEl = $("status");
+
+    const hintEl = $("hint");
+
+function setRecordingUI(on) {
+  recordBtn.classList.toggle("recording", on);
+  recordBtn.setAttribute("aria-pressed", String(on));
+  recordBtn.setAttribute("aria-label", on ? "Stop recording" : "Start recording");
+  hintEl.textContent = on
+    ? "Recording... tap the mic again when you're done."
+    : "Tap the mic and start speaking. Tap again to stop.";
+}
+
+    let recorder = null;
+    let stream = null;
+    let chunks = [];
+    let renderCount = 0;
+
+    function setStatus(text, isError = false) {
+      statusEl.textContent = text;
+      statusEl.className = isError ? "error" : "";
+    }
+
+    // Safari records MP4, Chrome/Firefox record WebM. Pick what the browser supports.
+    function pickMimeType() {
+      const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
+      return candidates.find((t) => MediaRecorder.isTypeSupported(t)) || "";
+    }
+
+    async function api(path, options) {
+      let res;
+      try {
+        res = await fetch(path, options);
+      } catch {
+        throw new Error("Can't reach the server. Please check it is running and try again.");
+      }
+      if (!res.ok) {
+        console.error(path, res.status, await res.text()); // full details stay in the console
+        if (res.status === 413) {
+          throw new Error("That recording is too long. Please try a shorter one.");
+        }
+        if (res.status === 422) {
+          throw new Error("We couldn't hear enough. Please speak a bit longer and louder, then try again.");
+        }
+        throw new Error("Something went wrong. Please try again.");
+      }
+      return res.json();
+    }
+
+    const postJSON = (path, data) =>
+      api(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+
+    function listEl(items) {
+      const ul = document.createElement("ul");
+      for (const item of items) {
+        const li = document.createElement("li");
+        li.textContent = item; // textContent, never innerHTML: LLM output is untrusted
+        ul.appendChild(li);
+      }
+      return ul;
+    }
+
+    function renderNotes(note) {
+      const box = $("notes");
+      box.replaceChildren();
+
+      const title = document.createElement("h3");
+      title.textContent = note.title;
+      const summary = document.createElement("p");
+      summary.textContent = note.summary;
+      box.append(title, summary);
+
+      const kp = document.createElement("h4");
+      kp.textContent = "Key points";
+      box.append(kp, listEl(note.key_points));
+
+      if (note.action_items.length) {
+        const ai = document.createElement("h4");
+        ai.textContent = "Action items";
+        box.append(ai, listEl(note.action_items));
+      }
+    }
+
+    async function renderMindmap(code) {
+      renderCount += 1; // unique id per render avoids Mermaid id clashes
+      const { svg } = await mermaid.render(`mindmap-${renderCount}`, code);
+      $("diagram").innerHTML = svg;
+    }
+
+    let diagramStyle = "mindmap";
+    let lastNote = null;
+
+    async function drawDiagram() {
+      const result = await postJSON(`/illustrate?style=${diagramStyle}`, lastNote);
+      await renderMindmap(result.mermaid);
+    }
+
+    document.querySelectorAll(".seg button").forEach((btn) =>
+      btn.addEventListener("click", async () => {
+        if (btn.dataset.style === diagramStyle) return;
+        diagramStyle = btn.dataset.style;
+        document.querySelectorAll(".seg button").forEach((b) =>
+          b.classList.toggle("active", b === btn)
+        );
+        if (!lastNote) return; // nothing recorded yet, just remember the choice
+        recordBtn.disabled = true;
+        setStatus("Drawing diagram...");
+        try {
+          await drawDiagram();
+          setStatus("Done.");
+        } catch (err) {
+          console.error(err);
+          setStatus(err.message, true);
+        } finally {
+          recordBtn.disabled = false;
+        }
+      })
+    );
+
+    async function processRecording(blob, ext) {
+      recordBtn.disabled = true;
+      try {
+        setStatus("Transcribing...");
+        const form = new FormData();
+        form.append("file", blob, `recording.${ext}`); // filename extension tells the API the format
+        const { transcript } = await api("/transcribe", { method: "POST", body: form });
+        $("transcript").textContent = transcript;
+        if (transcript.trim().length < 20) {
+          setStatus("We couldn't hear enough. Please speak a bit longer and louder, then try again.", true);
+          return;
+        }
+
+        setStatus("Writing notes...");
+        const note = await postJSON("/notes", { transcript });
+        renderNotes(note);
+
+        setStatus("Drawing diagram...");
+        lastNote = note;
+        await drawDiagram();
+
+        setStatus("Done.");
+      } catch (err) {
+        console.error(err);
+        setStatus(err.message, true);
+      } finally {
+        recordBtn.disabled = false;
+      }
+    }
+
+    async function startRecording() {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch {
+        setStatus("Microphone access was blocked. Allow it in the browser and try again.", true);
+        return;
+      }
+      chunks = [];
+      const mimeType = pickMimeType();
+      recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+      recorder.onstop = () => {
+        stream.getTracks().forEach((t) => t.stop()); // release the mic indicator
+        const type = recorder.mimeType || "audio/webm";
+        const ext = type.includes("mp4") ? "mp4" : "webm";
+        const blob = new Blob(chunks, { type });
+        if (blob.size === 0) {
+          setStatus("Nothing was recorded. Try again.", true);
+          return;
+        }
+        processRecording(blob, ext);
+      };
+      recorder.start();
+      setRecordingUI(true);
+      setStatus("");
+    }
+
+    function stopRecording() {
+      recorder.stop();
+      setRecordingUI(false);
+    }
+
+    recordBtn.addEventListener("click", () => {
+      if (recorder && recorder.state === "recording") stopRecording();
+      else startRecording();
+    });
+  </script>
+</body>
+</html>
